@@ -24,9 +24,12 @@ type Manager struct {
 	scheduler    *scheduler.Scheduler
 	inboundQueue *bytes.Buffer
 	
+	// HMM Classifier for dynamic profiling
+	classifier   *HMMClassifier
+	observationQueue []int
+	
 	// Dynamic profiling state
-	dynamicProfileThresholds map[profile.TrafficType]float64
-	lastProfileSwitch        time.Time
+	lastProfileSwitch time.Time
 }
 
 // NewManager initializes a new Disguise Manager.
@@ -40,12 +43,8 @@ func NewManager() *Manager {
 		reassembler:  framing.NewReassembler(),
 		scheduler:    s,
 		inboundQueue: new(bytes.Buffer),
-		
-		dynamicProfileThresholds: map[profile.TrafficType]float64{
-			profile.WebBrowsing:    0.2, // Low load
-			profile.VideoStreaming: 0.8, // High load
-			profile.FileDownload:   0.5, // Medium load
-		},
+		classifier:   NewHMMClassifier(),
+		observationQueue: make([]int, 0, 100),
 		lastProfileSwitch: time.Now(),
 	}
 
@@ -76,6 +75,8 @@ func (m *Manager) QueueApplicationData(data []byte) error {
 	}
 
 	for _, cell := range cells {
+		// Collect payload length for HMM classification
+		m.observationQueue = append(m.observationQueue, DiscretizePayloadSize(len(cell.Payload)))
 		m.scheduler.ScheduleCell(cell)
 	}
 
@@ -111,6 +112,9 @@ func (m *Manager) ProcessInboundTraffic(data []byte) error {
 	}
 
 	if cell.Type == framing.TypeData {
+		// Collect payload length for HMM classification
+		m.observationQueue = append(m.observationQueue, DiscretizePayloadSize(len(cell.Payload)))
+		
 		reassembled, err := m.reassembler.ProcessCell(cell)
 		if err != nil {
 			return fmt.Errorf("failed to reassemble cell: %w", err)
@@ -158,32 +162,34 @@ func (m *Manager) startCoverTrafficLoop() {
 
 // startDynamicProfilingLoop analyzes traffic load and switches profiles accordingly.
 func (m *Manager) startDynamicProfilingLoop() {
-	ticker := time.NewTicker(1 * time.Minute)
+	ticker := time.NewTicker(5 * time.Second) // Check more frequently
 	defer ticker.Stop()
 
 	for {
 		<-ticker.C
 		m.mu.Lock()
 		
-		// 修复: 使用导出的字段 'CurrentLoad'
-		currentLoad := m.profile.CurrentLoad
-		
-		if currentLoad > m.dynamicProfileThresholds[profile.VideoStreaming] {
-			if m.profile.TrafficWeights[profile.VideoStreaming] == 0 {
-				m.SetProfile(profile.GetProfile(profile.VideoStreaming))
-				fmt.Println("Dynamic Profiling: Switched to VideoStreaming profile.")
-			}
-		} else if currentLoad > m.dynamicProfileThresholds[profile.FileDownload] {
-			if m.profile.TrafficWeights[profile.FileDownload] == 0 {
-				m.SetProfile(profile.GetProfile(profile.FileDownload))
-				fmt.Println("Dynamic Profiling: Switched to FileDownload profile.")
-			}
-		} else {
-			if m.profile.TrafficWeights[profile.WebBrowsing] == 0 {
-				m.SetProfile(profile.GetProfile(profile.WebBrowsing))
-				fmt.Println("Dynamic Profiling: Switched to WebBrowsing profile.")
-			}
+		// 确保有足够的观察值来做预测
+		if len(m.observationQueue) < 10 {
+			m.mu.Unlock()
+			continue
 		}
+		
+		// 使用 HMM 预测最可能的流量类型
+		predictedType, err := m.classifier.Predict(m.observationQueue)
+		if err != nil {
+			m.mu.Unlock()
+			continue
+		}
+		
+		// 如果预测的类型与当前类型不同，则切换配置文件
+		if predictedType != m.profile.GetProfileType() {
+			m.SetProfile(profile.GetProfile(predictedType))
+			fmt.Printf("动态剖析: 切换到 %v 配置文件。\n", predictedType)
+		}
+		
+		// 清空观察队列，准备下一次预测
+		m.observationQueue = m.observationQueue[:0]
 		m.mu.Unlock()
 	}
 }
