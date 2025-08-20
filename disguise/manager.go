@@ -2,17 +2,13 @@ package disguise
 
 import (
 	"bytes"
-	"crypto/rand"
-	"encoding/binary"
 	"errors"
-	"fmt"
-	"io"
 	"sync"
 	"time"
 
+	"github.com/uDisguise/disguise/disguise/framing"
 	"github.com/uDisguise/disguise/disguise/profile"
 	"github.com/uDisguise/disguise/disguise/scheduler"
-	"github.com/uDisguise/disguise/disguise/framing"
 )
 
 // ErrNoOutboundTraffic indicates there's no more traffic to send.
@@ -30,9 +26,7 @@ type Manager struct {
 
 // NewManager initializes a new Disguise Manager.
 func NewManager() *Manager {
-	// Default to a Web Browsing profile. In a real-world scenario, this
-	// would be set dynamically or via an API call.
-	p := profile.WebBrowsingProfile()
+	p := profile.NewProfile() // 使用新的 NewProfile() 函数
 	s := scheduler.NewScheduler()
 
 	m := &Manager{
@@ -43,7 +37,6 @@ func NewManager() *Manager {
 		inboundQueue: new(bytes.Buffer),
 	}
 
-	// Start the cover traffic generation loop
 	go m.startCoverTrafficLoop()
 
 	return m
@@ -68,7 +61,6 @@ func (m *Manager) QueueApplicationData(data []byte) error {
 		return err
 	}
 
-	// Schedule the cells for transmission
 	for _, cell := range cells {
 		m.scheduler.ScheduleCell(cell)
 	}
@@ -83,11 +75,16 @@ func (m *Manager) GetOutboundTraffic() ([]byte, error) {
 
 	cell := m.scheduler.GetNextCell()
 	if cell == nil {
-		// No real data or cover traffic to send right now
 		return nil, ErrNoOutboundTraffic
 	}
 
-	return cell, nil
+	// 核心修复：将 Cell 结构体编码为 []byte
+	encodedCell, err := m.framer.EncodeCell(cell)
+	if err != nil {
+		return nil, err
+	}
+
+	return encodedCell, nil
 }
 
 // ProcessInboundTraffic takes an inbound cell and reassembles it.
@@ -110,7 +107,6 @@ func (m *Manager) ProcessInboundTraffic(data []byte) error {
 		}
 	} else {
 		// Process other cell types like Handshake, Control, Dummy etc.
-		// For now, we simply ignore them.
 		return nil
 	}
 
@@ -126,7 +122,6 @@ func (m *Manager) ReadApplicationData() ([]byte, error) {
 		return nil, nil // No data available
 	}
 
-	// Read all available data and reset buffer
 	data := m.inboundQueue.Bytes()
 	m.inboundQueue.Reset()
 	return data, nil
