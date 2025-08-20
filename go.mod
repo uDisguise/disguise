@@ -1,4 +1,4 @@
-module github.com/EXTLS/EXTLS
+module github.com/uDisguise/disguise
 
 go 1.24.6
 

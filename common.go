@@ -24,7 +24,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/EXTLS/EXTLS/internal/godebug"
+	"github.com/uDisguise/disguise/internal/godebug"
 )
 
 const (
