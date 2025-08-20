@@ -1,118 +1,117 @@
-## Disguise: A Go-based Library for Network Traffic Obfuscation
+好的，我已根据你提供的 `conn (1).go` 文件对 README 进行了修改，使其更准确地反映出伪装协议如何与 Go 标准库的 TLS 连接集成。
 
-### Introduction
+以下是更新后的 README。
 
-Disguise is a network traffic obfuscation protocol library written in Go. Its goal is to evade Deep Packet Inspection (DPI) and traffic analysis by disguising communication patterns. By combining techniques like **cover traffic**, **content-aware padding**, and **dynamic traffic shaping**, it hides your real data within seemingly natural background traffic, thereby enhancing network anonymity and censorship circumvention.
+-----
 
-This library provides a set of core components that can be easily integrated into any application requiring traffic obfuscation, such as VPNs, proxies, or instant messaging tools.
+# Go TLS with Disguise: An Obfuscated TLS Implementation
 
-### Core Concepts
+This repository is a fork of the standard Go `crypto/tls` library, enhanced with a built-in traffic obfuscation layer. By integrating the Disguise protocol directly into the TLS handshake and record layer, this library provides secure, end-to-end encrypted communication that is also resilient to network traffic analysis and deep packet inspection (DPI).
 
-The library is built on four main components that work together to achieve traffic obfuscation:
+The Disguise protocol operates transparently beneath the standard TLS record layer, shaping and padding network packets to mimic benign traffic patterns.
 
-  - **Profile**: Defines various traffic pattern parameters, such as those for web browsing, video streaming, and file downloading. Each profile contains unique cell size distributions, latency jitters, and probing intervals to accurately mimic specific behaviors.
-  - **Framer**: Is responsible for segmenting application-layer data into protocol cells and creating dummy cells for cover traffic. It implements content-aware padding, which generates realistic-looking padding data, such as fake HTTP/2 headers or Base64 encoded data, based on the current traffic type.
-  - **Scheduler**: Uses a priority queue to manage the order of packet transmission. It ensures that real data is prioritized while seamlessly inserting cover traffic into the data stream to maintain a stable transmission rate and pattern.
-  - **Manager**: The core orchestrator of the entire protocol. It connects the Framer and Scheduler and includes a dynamic traffic profiler. This profiler monitors the traffic load in real time and automatically switches to the most suitable profile as needed, enabling an adaptive obfuscation strategy.
+## Core Modifications
 
-### Installation
+  - **Seamless Integration**: A `disguise.Manager` is now initialized and attached directly to the `tls.Conn` object. This manager is responsible for the entire lifecycle of the obfuscation protocol, including dynamic profiling and scheduling.
+  - **Obfuscated I/O**: The `Read()` and `Write()` methods of the `tls.Conn` have been modified to use the Disguise protocol's queuing and scheduling logic.
+      - `Write()` queues application data to the Disguise manager. The manager then fragments this data into cells, intelligently pads them, and sends them to the underlying network connection according to its dynamic schedule.
+      - `Read()` reads incoming TLS records, passes them to the Disguise manager for reassembly, and returns the original application data to the caller once a complete message is received.
+  - **Adaptive Behavior**: The built-in dynamic profiling mechanism is active by default, ensuring that the traffic pattern adapts to the network load, further enhancing its covertness.
 
-Make sure you have a Go environment installed. Then, use the following command to install the library:
+## Installation
 
-```bash
-go get github.com/uDisguise/disguise
+This is not a standard Go module that can be installed via `go get`. Since it modifies the standard library, you must use Go's `replace` directive to point to this modified version.
+
+1.  Clone this repository to your local machine.
+2.  In your `go.mod` file, add the `replace` directive pointing to your local path:
+
+<!-- end list -->
+
+```go
+module my-project
+
+go 1.21
+
+require (
+    // other dependencies
+)
+
+replace crypto/tls => github.com/uDisguise/disguise
 ```
 
-### Usage Example
+## Usage
 
-The following code demonstrates how to use the Disguise library for data transmission within your application.
+Using the modified TLS library is straightforward. For most use cases, your code will remain nearly identical to a standard TLS implementation. The obfuscation happens automatically behind the scenes.
+
+Here is a basic client example demonstrating how to establish a connection and exchange data.
 
 ```go
 package main
 
 import (
+	"crypto/tls"
 	"fmt"
-	"github.com/uDisguise/disguise/disguise"
+	"log"
+	"net"
+	"time"
 )
 
 func main() {
-	// 1. Initialize the Disguise manager
-	//    This will start the background dynamic traffic profiling and cover traffic loops.
-	manager := disguise.NewManager()
+	// --- Client Side ---
+	fmt.Println("Attempting to dial TLS connection...")
 	
-	// 2. Simulate application-layer data to be sent
-	applicationData := []byte("Hello, this is a secret message that needs to be disguised from traffic analysis!")
-	
-	fmt.Printf("Original application data length: %d bytes\n", len(applicationData))
+	// Create a TLS configuration.
+	// The Disguise protocol will be initialized internally with a default "Dynamic" profile.
+	config := &tls.Config{
+		InsecureSkipVerify: true, // For example purposes, do not use in production
+	}
 
-	// 3. Hand over the application data to the manager for obfuscation
-	err := manager.QueueApplicationData(applicationData)
+	// Establish a TLS connection to the server.
+	// The modified Dial function will internally set up the Disguise manager.
+	conn, err := tls.Dial("tcp", "example.com:443", config)
 	if err != nil {
-		fmt.Printf("Failed to queue data: %v\n", err)
-		return
+		log.Fatalf("Failed to dial TLS connection: %v", err)
 	}
-
-	// 4. Get the obfuscated packets from the manager and simulate network transmission
-	var totalOutboundBytes int
-	for {
-		// Get the next available packet from the manager
-		packet, err := manager.GetOutboundTraffic()
-		if err == disguise.ErrNoOutboundTraffic {
-			// No more data to send, exit the loop
-			break
-		}
-		if err != nil {
-			fmt.Printf("Failed to get outbound traffic: %v\n", err)
-			return
-		}
-
-		totalOutboundBytes += len(packet)
-		
-		// Here, you would send the `packet` to your network connection
-		// Simulating sending to the network...
-		// fmt.Printf("Sending an obfuscated packet, length: %d bytes\n", len(packet))
-
-		// Simulate receiving the packet back and processing it with the manager
-		err = manager.ProcessInboundTraffic(packet)
-		if err != nil {
-			fmt.Printf("Failed to process inbound traffic: %v\n", err)
-			return
-		}
-	}
+	defer conn.Close()
 	
-	// 5. Read the de-obfuscated application data from the manager
-	reassembledData, err := manager.ReadApplicationData()
-	if err != nil {
-		fmt.Printf("Failed to read application data: %v\n", err)
-		return
-	}
+	fmt.Println("Successfully established TLS connection with Disguise enabled.")
 
-	fmt.Printf("Total bytes sent after obfuscation: %d bytes\n", totalOutboundBytes)
-	fmt.Printf("Received de-obfuscated data: %s\n", string(reassembledData))
+	// Send some application data.
+	// This data will be fragmented, shaped, and padded by the Disguise protocol
+	// before being sent over the network.
+	message := []byte("Hello from the disguised client!")
+	_, err = conn.Write(message)
+	if err != nil {
+		log.Fatalf("Failed to write to connection: %v", err)
+	}
+	fmt.Printf("Wrote %d bytes of application data.\n", len(message))
+
+	// In a real application, you would read the response here.
+	// The underlying Disguise protocol will reassemble incoming packets
+	// transparently.
+	buffer := make([]byte, 1024)
+	n, err := conn.Read(buffer)
+	if err != nil {
+		log.Fatalf("Failed to read from connection: %v", err)
+	}
+	fmt.Printf("Read %d bytes from server: %s\n", n, string(buffer[:n]))
 }
+
+// NOTE: A corresponding server using this same modified library is required.
 ```
 
-### Customization
+## Customization
 
-You can adjust the behavior of Disguise in the following ways:
+The current implementation initializes the `disguise.Manager` with a hardcoded `profile.Dynamic` profile, which automatically adapts to the network traffic.
 
-  - **Dynamically Change Profiles**: You can manually switch traffic modes at runtime by calling the `SetProfile` method to adapt to different application scenarios.
+To use a different profile (e.g., `profile.WebBrowsing` or `profile.VideoStreaming`), you would need to modify the `conn.go` file directly to pass the desired profile to `disguise.NewManager()`. A more flexible implementation would involve adding a new field to the `tls.Config` struct, but that requires more extensive changes to the standard library.
 
-<!-- end list -->
+## Limitations & Future Work
 
-```go
-// Switch to video streaming mode
-manager.SetProfile(profile.GetProfile(profile.VideoStreaming))
-```
+  - **Server Requirement**: This library requires both the client and server to be running this same modified version to correctly interpret the Disguised traffic.
+  - **Development Status**: This is a proof-of-concept implementation. It is not battle-tested and may have undiscovered bugs or performance issues.
+  - **Single-Stream Reassembly**: The current reassembler handles only a single logical stream. For multiplexed connections (e.g., HTTP/2), a more complex reassembly mechanism is required.
 
-  - **Create Custom Profiles**: You can modify the `disguise/profile/profile.go` file to add or adjust parameters, creating unique traffic patterns that suit your needs.
+## License
 
-### Limitations and Future Work
-
-  - **Simplified Machine Learning Model**: The current dynamic profiler is a simplified rule engine. Future versions could integrate more complex statistical models or actual machine learning algorithms for more precise traffic pattern recognition and switching.
-  - **Single-Stream Reassembler**: The current reassembler only supports processing a single data stream. For more complex applications, it needs to be refactored to support parallel reassembly of multiple streams.
-  - **Network Integration**: This library is a protocol core; it needs to be integrated with a complete network application (like a TLS `net.Conn`) to actually send and receive obfuscated data.
-
-### License
-
-This library is released under the MIT License.
+This project is released under the MIT License.
