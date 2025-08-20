@@ -2,7 +2,7 @@ package framing
 
 import (
 	"bytes"
-	"crypto/rand"
+	crypto_rand "crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
@@ -94,7 +94,19 @@ func (f *Framer) Fragment(data []byte) ([]*Cell, error) {
 		}
 		
 		cell.PaddingLen = uint16(paddingLen)
-		cell.Padding = f.generatePadding(paddingLen, f.profile.GetProfileType())
+		
+		// Infer profile type without calling a non-existent method
+		var currentProfileType profile.TrafficType
+		if len(f.profile.TrafficWeights) == 1 {
+			for t := range f.profile.TrafficWeights {
+				currentProfileType = t
+			}
+		} else {
+			// For dynamic profile, we assume WebBrowsing as a heuristic
+			currentProfileType = profile.WebBrowsing
+		}
+
+		cell.Padding = f.generatePadding(paddingLen, currentProfileType)
 
 		cell.RandOffset = f.generateRandomOffset(uint16(totalCellSize))
 
@@ -109,7 +121,17 @@ func (f *Framer) Fragment(data []byte) ([]*Cell, error) {
 func (f *Framer) CreateDummyCell() (*Cell, error) {
 	totalCellSize := f.profile.GetNextCellSize()
 	paddingLen := totalCellSize - CellHeaderLen
-	padding := f.generatePadding(paddingLen, f.profile.GetProfileType())
+
+	var currentProfileType profile.TrafficType
+	if len(f.profile.TrafficWeights) == 1 {
+		for t := range f.profile.TrafficWeights {
+			currentProfileType = t
+		}
+	} else {
+		currentProfileType = profile.WebBrowsing
+	}
+
+	padding := f.generatePadding(paddingLen, currentProfileType)
 
 	cell := &Cell{
 		CellID:     0x0000,
@@ -132,14 +154,11 @@ func (f *Framer) generatePadding(length int, profileType profile.TrafficType) []
 		return []byte{}
 	}
 
-	// For simplicity, we'll only do content-aware padding for WebBrowsing,
-	// and use random bytes for others.
 	if profileType == profile.WebBrowsing {
 		switch rand.Intn(2) {
 		case 0:
-			// Mimic a base64-encoded string
 			data := make([]byte, (length/4)*3)
-			rand.Read(data)
+			crypto_rand.Read(data)
 			encoded := make([]byte, base64.StdEncoding.EncodedLen(len(data)))
 			base64.StdEncoding.Encode(encoded, data)
 			if len(encoded) > length {
@@ -147,13 +166,11 @@ func (f *Framer) generatePadding(length int, profileType profile.TrafficType) []
 			}
 			padding := make([]byte, length)
 			copy(padding, encoded)
-			rand.Read(padding[len(encoded):]) // Fill the rest with random bytes
+			crypto_rand.Read(padding[len(encoded):])
 			return padding
 		case 1:
-			// Mimic compressed HTTP/2 headers or similar
 			padding := make([]byte, length)
-			// A simple pattern with some zeros and a few random bytes
-			rand.Read(padding)
+			crypto_rand.Read(padding)
 			for i := 0; i < len(padding); i += 10 {
 				padding[i] = 0x00
 			}
@@ -161,9 +178,8 @@ func (f *Framer) generatePadding(length int, profileType profile.TrafficType) []
 		}
 	}
 
-	// Default to cryptographically random padding
 	padding := make([]byte, length)
-	rand.Read(padding)
+	crypto_rand.Read(padding)
 	return padding
 }
 
@@ -181,7 +197,6 @@ func (f *Framer) EncodeCell(cell *Cell) ([]byte, error) {
 	
 	totalContent := make([]byte, cell.PayloadLen + cell.PaddingLen)
 	
-	// Copy payload and padding into the totalContent slice based on RandOffset.
 	copy(totalContent[cell.RandOffset:], cell.Payload)
 	copy(totalContent, cell.Padding[:cell.RandOffset])
 	copy(totalContent[cell.RandOffset+cell.PayloadLen:], cell.Padding[cell.RandOffset:])
@@ -226,7 +241,7 @@ func (f *Framer) DecodeCell(data []byte) (*Cell, error) {
 // generateCellID creates a cryptographically secure random CellID.
 func (f *Framer) generateCellID() uint16 {
 	var id [2]byte
-	_, err := rand.Read(id[:])
+	_, err := crypto_rand.Read(id[:])
 	if err != nil {
 		return 0
 	}
