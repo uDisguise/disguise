@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"your-project-path/disguise/framing"
-	"your-project-path/disguise/profile"
+	"github.com/uDisguise/disguise/disguise/framing"
+	"github.com/uDisguise/disguise/disguise/profile"
 )
 
 // Scheduler manages the transmission order and timing of cells.
