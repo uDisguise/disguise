@@ -116,6 +116,9 @@ type Conn struct {
 	activeCall int32
 
 	tmp [16]byte
+
+	// disguiseManager handles all the disguise protocol logic.
+	disguiseManager *disguise.Manager
 }
 
 // Access to net.Conn methods.
