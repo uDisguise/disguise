@@ -2,19 +2,27 @@ package disguise
 
 import (
 	"errors"
+	"fmt"
 	"github.com/uDisguise/disguise/disguise/profile"
 	"math"
+	"math/rand"
+	"sync"
 )
 
 // HMMClassifier encapsulates the Hidden Markov Model for traffic classification.
 type HMMClassifier struct {
+	mu sync.Mutex
+
 	// States are our traffic profiles.
 	States []profile.TrafficType
-	// Emission probabilities: P(observation | state).
-	// For simplicity, we discretize payload sizes into a few buckets.
-	EmissionProbs map[profile.TrafficType][]float64
-	// Transition probabilities: P(next state | current state).
+	
+	// Emission and Transition probabilities
+	EmissionProbs   map[profile.TrafficType][]float64
 	TransitionProbs map[profile.TrafficType]map[profile.TrafficType]float64
+	
+	// Counters for online learning (to update probabilities)
+	EmissionCounts   map[profile.TrafficType][]float64
+	TransitionCounts map[profile.TrafficType]map[profile.TrafficType]float64
 	
 	// A small value to prevent log(0) errors.
 	Epsilon float64
@@ -22,36 +30,41 @@ type HMMClassifier struct {
 
 // NewHMMClassifier creates and initializes a new HMM classifier.
 func NewHMMClassifier() *HMMClassifier {
-	// Define the traffic types (states) we are interested in.
 	states := []profile.TrafficType{
 		profile.WebBrowsing,
 		profile.VideoStreaming,
 		profile.FileDownload,
 	}
 
-	// Initialize with some sensible, smoothed prior probabilities.
-	// In a real-world scenario, these would be learned from a large dataset.
 	epsilon := 1e-9
 	emissionProbs := make(map[profile.TrafficType][]float64)
 	transitionProbs := make(map[profile.TrafficType]map[profile.TrafficType]float64)
+	emissionCounts := make(map[profile.TrafficType][]float64)
+	transitionCounts := make(map[profile.TrafficType]map[profile.TrafficType]float64)
 
 	// Web Browsing: prefers small and medium packets.
 	emissionProbs[profile.WebBrowsing] = []float64{0.7, 0.25, 0.05}
+	emissionCounts[profile.WebBrowsing] = []float64{0, 0, 0}
+	
 	// Video Streaming: prefers large packets.
 	emissionProbs[profile.VideoStreaming] = []float64{0.1, 0.3, 0.6}
+	emissionCounts[profile.VideoStreaming] = []float64{0, 0, 0}
+	
 	// File Download: prefers consistently large packets.
 	emissionProbs[profile.FileDownload] = []float64{0.05, 0.05, 0.9}
-
-	// Transition probabilities (smoothed to avoid zero-probability).
+	emissionCounts[profile.FileDownload] = []float64{0, 0, 0}
+	
 	for _, s1 := range states {
 		transitionProbs[s1] = make(map[profile.TrafficType]float64)
+		transitionCounts[s1] = make(map[profile.TrafficType]float64)
 		for _, s2 := range states {
-			transitionProbs[s1][s2] = 1.0 / float64(len(states)) // Uniform prior
+			transitionProbs[s1][s2] = 1.0 / float64(len(states))
+			transitionCounts[s1][s2] = 0
 		}
 	}
 
-	// Add smoothing
-	for _, emissions := range emissionProbs {
+	// Add smoothing to initial probabilities
+	for s, emissions := range emissionProbs {
 		sum := 0.0
 		for i, p := range emissions {
 			emissions[i] = p + epsilon
@@ -63,30 +76,31 @@ func NewHMMClassifier() *HMMClassifier {
 	}
 
 	return &HMMClassifier{
-		States:        states,
-		EmissionProbs: emissionProbs,
-		TransitionProbs: transitionProbs,
-		Epsilon:       epsilon,
+		States:           states,
+		EmissionProbs:    emissionProbs,
+		TransitionProbs:  transitionProbs,
+		EmissionCounts:   emissionCounts,
+		TransitionCounts: transitionCounts,
+		Epsilon:          epsilon,
 	}
 }
 
-// Predict takes a sequence of observations (discretized cell lengths) and
-// returns the most likely hidden state (traffic type) sequence using the Viterbi algorithm.
+// Predict takes a sequence of observations and returns the most likely hidden state.
 func (h *HMMClassifier) Predict(observations []int) (profile.TrafficType, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	
 	if len(observations) == 0 {
 		return 0, errors.New("observations cannot be empty")
 	}
 
 	numStates := len(h.States)
 	numObservations := len(observations)
-	
-	// State mapping for easy lookup
 	stateMap := make(map[profile.TrafficType]int)
 	for i, s := range h.States {
 		stateMap[s] = i
 	}
 	
-	// Viterbi path and probability matrix
 	viterbi := make([][]float64, numStates)
 	backpointer := make([][]int, numStates)
 	for i := range viterbi {
@@ -94,14 +108,11 @@ func (h *HMMClassifier) Predict(observations []int) (profile.TrafficType, error)
 		backpointer[i] = make([]int, numObservations)
 	}
 
-	// Initialization step (t=0)
 	for i, state := range h.States {
-		obs := observations[0]
 		initialProb := 1.0 / float64(numStates)
-		viterbi[i][0] = math.Log(initialProb) + math.Log(h.EmissionProbs[state][obs])
+		viterbi[i][0] = math.Log(initialProb) + math.Log(h.EmissionProbs[state][observations[0]])
 	}
 	
-	// Recursion step (t=1 to T-1)
 	for t := 1; t < numObservations; t++ {
 		obs := observations[t]
 		for i, currentState := range h.States {
@@ -119,7 +130,6 @@ func (h *HMMClassifier) Predict(observations []int) (profile.TrafficType, error)
 		}
 	}
 
-	// Termination step
 	maxProb := -math.MaxFloat64
 	lastState := 0
 	for i := range h.States {
@@ -128,9 +138,68 @@ func (h *HMMClassifier) Predict(observations []int) (profile.TrafficType, error)
 			lastState = i
 		}
 	}
-
-	// Return the most likely final state
 	return h.States[lastState], nil
+}
+
+// Train updates the HMM's probabilities based on a sequence of observations and the corresponding ground truth.
+func (h *HMMClassifier) Train(observations []int, groundTruth profile.TrafficType) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	
+	if len(observations) == 0 {
+		return errors.New("observations cannot be empty")
+	}
+
+	// For a simplified online learning, we just update the counts.
+	// A more robust solution would implement Baum-Welch or Viterbi training.
+	
+	// Update emission counts
+	for _, obs := range observations {
+		if obs >= len(h.EmissionCounts[groundTruth]) {
+			continue // Skip invalid observations
+		}
+		h.EmissionCounts[groundTruth][obs]++
+	}
+
+	// Update transition counts (assuming a single, consistent state)
+	if len(observations) > 1 {
+		h.TransitionCounts[groundTruth][groundTruth] += float64(len(observations) - 1)
+	}
+	
+	// Re-normalize probabilities
+	h.reNormalizeProbabilities()
+	
+	return nil
+}
+
+func (h *HMMClassifier) reNormalizeProbabilities() {
+	// Re-normalize emission probabilities from counts
+	for state, counts := range h.EmissionCounts {
+		total := 0.0
+		for _, count := range counts {
+			total += count
+		}
+		if total == 0 {
+			total = 1.0 // Prevent division by zero
+		}
+		for i := range counts {
+			h.EmissionProbs[state][i] = (counts[i] + h.Epsilon) / (total + float64(len(counts))*h.Epsilon)
+		}
+	}
+	
+	// Re-normalize transition probabilities
+	for state, transitions := range h.TransitionCounts {
+		total := 0.0
+		for _, count := range transitions {
+			total += count
+		}
+		if total == 0 {
+			total = 1.0
+		}
+		for nextState, count := range transitions {
+			h.TransitionProbs[state][nextState] = (count + h.Epsilon) / (total + float64(len(transitions))*h.Epsilon)
+		}
+	}
 }
 
 // DiscretizePayloadSize maps a payload length to a discrete bucket.
