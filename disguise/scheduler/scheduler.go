@@ -20,7 +20,7 @@ type Scheduler struct {
 // NewScheduler creates a new Scheduler instance.
 func NewScheduler() *Scheduler {
 	return &Scheduler{
-		profile:      profile.WebBrowsingProfile(), // Default profile
+		profile:      profile.NewProfile(), // 使用新的 NewProfile() 函数
 		queue:        make([]*framing.Cell, 0),
 		lastSendTime: time.Now(),
 	}
