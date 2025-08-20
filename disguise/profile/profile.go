@@ -34,7 +34,7 @@ type Profile struct {
 	// This would be dynamically updated by a separate ML component.
 	// For this production-grade example, we will use static, pre-defined values.
 	PayloadDistributions map[TrafficType]distribution
-	
+
 	mu sync.Mutex
 	// State for the adaptive model.
 	currentLoad float64
@@ -113,20 +113,14 @@ func NewProfile() *Profile {
 }
 
 // GetNextPayloadLength returns a simulated payload length based on the active profile.
-// This is the production-ready version.
 func (p *Profile) GetNextPayloadLength() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Step 1: Dynamically select a traffic type based on weights.
-	// This can be adapted based on the current load or application API.
 	trafficType := p.selectTrafficType()
-
-	// Step 2: Sample a length from the selected distribution.
 	dist := p.PayloadDistributions[trafficType]
 	length := dist.Sample()
 
-	// Step 3: Clamp the length to the configured size boundaries.
 	if length > p.MaxCellSize-CellHeaderLen {
 		length = p.MaxCellSize - CellHeaderLen
 	}
@@ -134,10 +128,16 @@ func (p *Profile) GetNextPayloadLength() int {
 		length = 1
 	}
 	
-	// Step 4: Update the adaptive model with the newly generated length.
 	p.updateLoad(length)
 
 	return length
+}
+
+// GetNextCellSize returns a simulated total cell size.
+func (p *Profile) GetNextCellSize() int {
+	// A simple but effective method: return a length drawn from a uniform distribution,
+	// but can be replaced with a more complex model based on traffic type.
+	return rand.Intn(p.MaxCellSize-p.MinCellSize) + p.MinCellSize
 }
 
 // selectTrafficType selects a traffic type based on weighted probabilities.
@@ -150,14 +150,12 @@ func (p *Profile) selectTrafficType() TrafficType {
 			return typ
 		}
 	}
-	// Fallback to a default type if something goes wrong.
 	return WebBrowsing
 }
 
 // updateLoad simulates an adaptive mechanism by updating the current load
 // using an Exponentially Weighted Moving Average (EWMA).
 func (p *Profile) updateLoad(latest int) {
-	// Normalize the latest value to a percentage of MaxCellSize.
 	normalized := float64(latest) / float64(p.MaxCellSize)
 	p.currentLoad = (p.currentLoad * (1 - p.EWMAAlpha)) + (normalized * p.EWMAAlpha)
 }
