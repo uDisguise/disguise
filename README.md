@@ -20,10 +20,8 @@ The library is built on four main components that work together to achieve traff
 Make sure you have a Go environment installed. Then, use the following command to install the library:
 
 ```bash
-go get your-project-path/disguise
+go get github.com/uDisguise/disguise
 ```
-
-*Note: Please replace `your-project-path` with the actual path to your project.*
 
 ### Usage Example
 
