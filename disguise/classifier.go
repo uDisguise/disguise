@@ -2,11 +2,8 @@ package disguise
 
 import (
 	"errors"
-	"fmt"
 	"github.com/uDisguise/disguise/disguise/profile"
 	"math"
-	"math/rand"
-	"time"
 )
 
 // HMMClassifier encapsulates the Hidden Markov Model for traffic classification.
@@ -54,7 +51,7 @@ func NewHMMClassifier() *HMMClassifier {
 	}
 
 	// Add smoothing
-	for s, emissions := range emissionProbs {
+	for _, emissions := range emissionProbs {
 		sum := 0.0
 		for i, p := range emissions {
 			emissions[i] = p + epsilon
