@@ -14,6 +14,8 @@ const (
 	WebBrowsing TrafficType = iota
 	VideoStreaming
 	FileDownload
+	// New dynamic profile mode
+	Dynamic
 	CellHeaderLen = 20
 )
 
@@ -23,21 +25,13 @@ type Profile struct {
 	MaxCellSize       int
 	ProbingInterval   time.Duration
 	LatencyJitter     time.Duration
-	// EWMAAlpha is the smoothing factor for the adaptive model.
-	EWMAAlpha float64
-
-	// Weights for dynamic traffic type selection.
-	// The sum of these weights should be 1.0.
-	TrafficWeights map[TrafficType]float64
-
-	// The current payload length distribution parameters.
-	// This would be dynamically updated by a separate ML component.
-	// For this production-grade example, we will use static, pre-defined values.
+	EWMAAlpha         float64
+	TrafficWeights    map[TrafficType]float64
 	PayloadDistributions map[TrafficType]distribution
 
 	mu sync.Mutex
 	// State for the adaptive model.
-	currentLoad float64
+	CurrentLoad float64 // 修复: 将 'currentLoad' 改为 'CurrentLoad'
 }
 
 // distribution is an interface for a statistical distribution.
@@ -50,12 +44,11 @@ type distribution interface {
 type bimodalDistribution struct {
 	mode1Mean   float64
 	mode1StdDev float64
-	mode1Weight float64 // The weight of the first mode (e.g., small packets)
+	mode1Weight float64
 	mode2Mean   float64
 	mode2StdDev float64
 }
 
-// Sample samples a value from the bimodal distribution.
 func (d *bimodalDistribution) Sample() int {
 	if rand.Float64() < d.mode1Weight {
 		return int(math.Max(1, rand.NormFloat64()*d.mode1StdDev+d.mode1Mean))
@@ -63,52 +56,104 @@ func (d *bimodalDistribution) Sample() int {
 	return int(math.Max(1, rand.NormFloat64()*d.mode2StdDev+d.mode2Mean))
 }
 
-// paretoDistribution simulates a "heavy-tailed" distribution,
-// common for file sizes.
+// paretoDistribution simulates a "heavy-tailed" distribution.
 type paretoDistribution struct {
 	alpha float64
 	xm    float64
 }
 
-// Sample samples a value from the Pareto distribution.
 func (d *paretoDistribution) Sample() int {
 	return int(math.Max(1, d.xm/math.Pow(rand.Float64(), 1/d.alpha)))
 }
 
-// NewProfile creates a new Profile instance with production-ready distributions.
-func NewProfile() *Profile {
-	return &Profile{
-		MinCellSize:     64,
-		MaxCellSize:     1400,
-		ProbingInterval: 15 * time.Second,
-		LatencyJitter:   20 * time.Millisecond,
-		EWMAAlpha:       0.1,
-		TrafficWeights: map[TrafficType]float64{
-			WebBrowsing:    0.7,
-			VideoStreaming: 0.2,
-			FileDownload:   0.1,
-		},
-		PayloadDistributions: map[TrafficType]distribution{
-			WebBrowsing: &bimodalDistribution{
-				mode1Mean:   100,
-				mode1StdDev: 20,
-				mode1Weight: 0.8, // 80% of packets are small
-				mode2Mean:   1000,
-				mode2StdDev: 150,
+// GetProfile returns a pre-configured profile instance.
+func GetProfile(t TrafficType) *Profile {
+	switch t {
+	case WebBrowsing:
+		return &Profile{
+			MinCellSize:     64,
+			MaxCellSize:     1400,
+			ProbingInterval: 15 * time.Second,
+			LatencyJitter:   20 * time.Millisecond,
+			EWMAAlpha:       0.1,
+			TrafficWeights: map[TrafficType]float64{WebBrowsing: 1.0},
+			PayloadDistributions: map[TrafficType]distribution{
+				WebBrowsing: &bimodalDistribution{
+					mode1Mean:   100,
+					mode1StdDev: 20,
+					mode1Weight: 0.8,
+					mode2Mean:   1000,
+					mode2StdDev: 150,
+				},
 			},
-			VideoStreaming: &bimodalDistribution{
-				mode1Mean:   64,  // small control packets
-				mode1StdDev: 10,
-				mode1Weight: 0.2,
-				mode2Mean:   1300, // large video data packets
-				mode2StdDev: 50,
+		}
+	case VideoStreaming:
+		return &Profile{
+			MinCellSize:     64,
+			MaxCellSize:     1400,
+			ProbingInterval: 10 * time.Second,
+			LatencyJitter:   10 * time.Millisecond,
+			EWMAAlpha:       0.2,
+			TrafficWeights: map[TrafficType]float64{VideoStreaming: 1.0},
+			PayloadDistributions: map[TrafficType]distribution{
+				VideoStreaming: &bimodalDistribution{
+					mode1Mean:   64,
+					mode1StdDev: 10,
+					mode2Mean:   1300,
+					mode2StdDev: 50,
+					mode1Weight: 0.2,
+				},
 			},
-			FileDownload: &paretoDistribution{
-				alpha: 1.5, // Common alpha value for internet traffic
-				xm:    500,
+		}
+	case FileDownload:
+		return &Profile{
+			MinCellSize:     64,
+			MaxCellSize:     1400,
+			ProbingInterval: 30 * time.Second,
+			LatencyJitter:   50 * time.Millisecond,
+			EWMAAlpha:       0.05,
+			TrafficWeights: map[TrafficType]float64{FileDownload: 1.0},
+			PayloadDistributions: map[TrafficType]distribution{
+				FileDownload: &paretoDistribution{
+					alpha: 1.5,
+					xm:    500,
+				},
 			},
-		},
-		currentLoad: 0.0,
+		}
+	default:
+		// Dynamic profile acts as a meta-profile that manages weights
+		return &Profile{
+			MinCellSize:     64,
+			MaxCellSize:     1400,
+			ProbingInterval: 15 * time.Second,
+			LatencyJitter:   20 * time.Millisecond,
+			EWMAAlpha:       0.1,
+			TrafficWeights: map[TrafficType]float64{
+				WebBrowsing:    0.7,
+				VideoStreaming: 0.2,
+				FileDownload:   0.1,
+			},
+			PayloadDistributions: map[TrafficType]distribution{
+				WebBrowsing: &bimodalDistribution{
+					mode1Mean:   100,
+					mode1StdDev: 20,
+					mode1Weight: 0.8,
+					mode2Mean:   1000,
+					mode2StdDev: 150,
+				},
+				VideoStreaming: &bimodalDistribution{
+					mode1Mean:   64,
+					mode1StdDev: 10,
+					mode1Weight: 0.2,
+					mode2Mean:   1300,
+					mode2StdDev: 50,
+				},
+				FileDownload: &paretoDistribution{
+					alpha: 1.5,
+					xm:    500,
+				},
+			},
+		}
 	}
 }
 
@@ -135,13 +180,28 @@ func (p *Profile) GetNextPayloadLength() int {
 
 // GetNextCellSize returns a simulated total cell size.
 func (p *Profile) GetNextCellSize() int {
-	// A simple but effective method: return a length drawn from a uniform distribution,
-	// but can be replaced with a more complex model based on traffic type.
 	return rand.Intn(p.MaxCellSize-p.MinCellSize) + p.MinCellSize
+}
+
+// GetProfileType returns the current active profile type based on weights.
+func (p *Profile) GetProfileType() TrafficType {
+	if len(p.TrafficWeights) == 1 {
+		for t := range p.TrafficWeights {
+			return t
+		}
+	}
+	// For dynamic profiles, we can return the 'Dynamic' constant.
+	return Dynamic
 }
 
 // selectTrafficType selects a traffic type based on weighted probabilities.
 func (p *Profile) selectTrafficType() TrafficType {
+	if len(p.TrafficWeights) == 1 {
+		for t := range p.TrafficWeights {
+			return t
+		}
+	}
+	
 	r := rand.Float64()
 	cumulativeWeight := 0.0
 	for typ, weight := range p.TrafficWeights {
@@ -150,12 +210,12 @@ func (p *Profile) selectTrafficType() TrafficType {
 			return typ
 		}
 	}
-	return WebBrowsing
+	return WebBrowsing // Fallback
 }
 
 // updateLoad simulates an adaptive mechanism by updating the current load
 // using an Exponentially Weighted Moving Average (EWMA).
 func (p *Profile) updateLoad(latest int) {
 	normalized := float64(latest) / float64(p.MaxCellSize)
-	p.currentLoad = (p.currentLoad * (1 - p.EWMAAlpha)) + (normalized * p.EWMAAlpha)
+	p.CurrentLoad = (p.CurrentLoad * (1 - p.EWMAAlpha)) + (normalized * p.EWMAAlpha)
 }

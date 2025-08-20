@@ -3,6 +3,7 @@ package disguise
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -22,22 +23,34 @@ type Manager struct {
 	reassembler  *framing.Reassembler
 	scheduler    *scheduler.Scheduler
 	inboundQueue *bytes.Buffer
+	
+	// Dynamic profiling state
+	dynamicProfileThresholds map[profile.TrafficType]float64
+	lastProfileSwitch        time.Time
 }
 
 // NewManager initializes a new Disguise Manager.
 func NewManager() *Manager {
-	p := profile.NewProfile() // 使用新的 NewProfile() 函数
+	p := profile.GetProfile(profile.Dynamic) // 默认使用动态模式
 	s := scheduler.NewScheduler()
-
+	
 	m := &Manager{
 		profile:      p,
 		framer:       framing.NewFramer(p),
 		reassembler:  framing.NewReassembler(),
 		scheduler:    s,
 		inboundQueue: new(bytes.Buffer),
+		
+		dynamicProfileThresholds: map[profile.TrafficType]float64{
+			profile.WebBrowsing:    0.2, // Low load
+			profile.VideoStreaming: 0.8, // High load
+			profile.FileDownload:   0.5, // Medium load
+		},
+		lastProfileSwitch: time.Now(),
 	}
 
 	go m.startCoverTrafficLoop()
+	go m.startDynamicProfilingLoop()
 
 	return m
 }
@@ -49,6 +62,7 @@ func (m *Manager) SetProfile(p *profile.Profile) {
 	m.profile = p
 	m.framer.SetProfile(p)
 	m.scheduler.SetProfile(p)
+	m.lastProfileSwitch = time.Now()
 }
 
 // QueueApplicationData takes application data and fragments it into cells.
@@ -78,10 +92,9 @@ func (m *Manager) GetOutboundTraffic() ([]byte, error) {
 		return nil, ErrNoOutboundTraffic
 	}
 
-	// 核心修复：将 Cell 结构体编码为 []byte
 	encodedCell, err := m.framer.EncodeCell(cell)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to encode cell: %w", err)
 	}
 
 	return encodedCell, nil
@@ -94,13 +107,13 @@ func (m *Manager) ProcessInboundTraffic(data []byte) error {
 
 	cell, err := m.framer.DecodeCell(data)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to decode cell: %w", err)
 	}
 
 	if cell.Type == framing.TypeData {
 		reassembled, err := m.reassembler.ProcessCell(cell)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to reassemble cell: %w", err)
 		}
 		if reassembled != nil {
 			m.inboundQueue.Write(reassembled)
@@ -138,6 +151,38 @@ func (m *Manager) startCoverTrafficLoop() {
 		dummyCell, err := m.framer.CreateDummyCell()
 		if err == nil {
 			m.scheduler.ScheduleCell(dummyCell)
+		}
+		m.mu.Unlock()
+	}
+}
+
+// startDynamicProfilingLoop analyzes traffic load and switches profiles accordingly.
+func (m *Manager) startDynamicProfilingLoop() {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		<-ticker.C
+		m.mu.Lock()
+		
+		// 修复: 使用导出的字段 'CurrentLoad'
+		currentLoad := m.profile.CurrentLoad
+		
+		if currentLoad > m.dynamicProfileThresholds[profile.VideoStreaming] {
+			if m.profile.TrafficWeights[profile.VideoStreaming] == 0 {
+				m.SetProfile(profile.GetProfile(profile.VideoStreaming))
+				fmt.Println("Dynamic Profiling: Switched to VideoStreaming profile.")
+			}
+		} else if currentLoad > m.dynamicProfileThresholds[profile.FileDownload] {
+			if m.profile.TrafficWeights[profile.FileDownload] == 0 {
+				m.SetProfile(profile.GetProfile(profile.FileDownload))
+				fmt.Println("Dynamic Profiling: Switched to FileDownload profile.")
+			}
+		} else {
+			if m.profile.TrafficWeights[profile.WebBrowsing] == 0 {
+				m.SetProfile(profile.GetProfile(profile.WebBrowsing))
+				fmt.Println("Dynamic Profiling: Switched to WebBrowsing profile.")
+			}
 		}
 		m.mu.Unlock()
 	}

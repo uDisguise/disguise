@@ -1,13 +1,15 @@
 package framing
 
 import (
-	"crypto/rand"
+	"bytes"
+	crypto_rand "crypto/rand"
+	"encoding/base64"
 	"encoding/binary"
 	"errors"
-	"time"
+	"math/rand"
 	"sync"
-	"bytes"
-	
+	"time"
+
 	"github.com/uDisguise/disguise/disguise/profile"
 )
 
@@ -70,15 +72,13 @@ func (f *Framer) Fragment(data []byte) ([]*Cell, error) {
 			CellID:    cellID,
 			Type:      TypeData,
 			Flags:     0x00,
-			Timestamp: time.Now().UnixNano() / 1e6, // Milliseconds since Unix epoch
+			Timestamp: time.Now().UnixNano() / 1e6,
 		}
 		
-		// Use a simple fragmentation strategy for now, can be improved with
-		// dynamic profiling based on profile.MaxCellSize and others.
 		payloadLen := f.profile.GetNextPayloadLength()
 		if payloadOffset+payloadLen > len(data) {
 			payloadLen = len(data) - payloadOffset
-			cell.Flags |= 0x01 // Set End of Stream flag
+			cell.Flags |= 0x01
 		}
 
 		cell.PayloadLen = uint16(payloadLen)
@@ -88,12 +88,25 @@ func (f *Framer) Fragment(data []byte) ([]*Cell, error) {
 
 		totalCellSize := f.profile.GetNextCellSize()
 		paddingLen := totalCellSize - CellHeaderLen - payloadLen
-		cell.PaddingLen = uint16(paddingLen)
-		cell.Padding = make([]byte, paddingLen)
-		_, err := rand.Read(cell.Padding)
-		if err != nil {
-			return nil, err
+		
+		if paddingLen < 0 {
+			paddingLen = 0
 		}
+		
+		cell.PaddingLen = uint16(paddingLen)
+		
+		// Infer profile type without calling a non-existent method
+		var currentProfileType profile.TrafficType
+		if len(f.profile.TrafficWeights) == 1 {
+			for t := range f.profile.TrafficWeights {
+				currentProfileType = t
+			}
+		} else {
+			// For dynamic profile, we assume WebBrowsing as a heuristic
+			currentProfileType = profile.WebBrowsing
+		}
+
+		cell.Padding = f.generatePadding(paddingLen, currentProfileType)
 
 		cell.RandOffset = f.generateRandomOffset(uint16(totalCellSize))
 
@@ -108,11 +121,17 @@ func (f *Framer) Fragment(data []byte) ([]*Cell, error) {
 func (f *Framer) CreateDummyCell() (*Cell, error) {
 	totalCellSize := f.profile.GetNextCellSize()
 	paddingLen := totalCellSize - CellHeaderLen
-	padding := make([]byte, paddingLen)
-	_, err := rand.Read(padding)
-	if err != nil {
-		return nil, err
+
+	var currentProfileType profile.TrafficType
+	if len(f.profile.TrafficWeights) == 1 {
+		for t := range f.profile.TrafficWeights {
+			currentProfileType = t
+		}
+	} else {
+		currentProfileType = profile.WebBrowsing
 	}
+
+	padding := f.generatePadding(paddingLen, currentProfileType)
 
 	cell := &Cell{
 		CellID:     0x0000,
@@ -129,6 +148,41 @@ func (f *Framer) CreateDummyCell() (*Cell, error) {
 	return cell, nil
 }
 
+// generatePadding creates content-aware or random padding.
+func (f *Framer) generatePadding(length int, profileType profile.TrafficType) []byte {
+	if length <= 0 {
+		return []byte{}
+	}
+
+	if profileType == profile.WebBrowsing {
+		switch rand.Intn(2) {
+		case 0:
+			data := make([]byte, (length/4)*3)
+			crypto_rand.Read(data)
+			encoded := make([]byte, base64.StdEncoding.EncodedLen(len(data)))
+			base64.StdEncoding.Encode(encoded, data)
+			if len(encoded) > length {
+				return encoded[:length]
+			}
+			padding := make([]byte, length)
+			copy(padding, encoded)
+			crypto_rand.Read(padding[len(encoded):])
+			return padding
+		case 1:
+			padding := make([]byte, length)
+			crypto_rand.Read(padding)
+			for i := 0; i < len(padding); i += 10 {
+				padding[i] = 0x00
+			}
+			return padding
+		}
+	}
+
+	padding := make([]byte, length)
+	crypto_rand.Read(padding)
+	return padding
+}
+
 // EncodeCell serializes a Cell struct into a byte slice.
 func (f *Framer) EncodeCell(cell *Cell) ([]byte, error) {
 	buf := new(bytes.Buffer)
@@ -141,12 +195,12 @@ func (f *Framer) EncodeCell(cell *Cell) ([]byte, error) {
 	if err := binary.Write(buf, binary.BigEndian, cell.PaddingLen); err != nil { return nil, err }
 	if err := binary.Write(buf, binary.BigEndian, cell.RandOffset); err != nil { return nil, err }
 	
-	// Reorder payload and padding based on RandOffset.
 	totalContent := make([]byte, cell.PayloadLen + cell.PaddingLen)
+	
 	copy(totalContent[cell.RandOffset:], cell.Payload)
 	copy(totalContent, cell.Padding[:cell.RandOffset])
-	copy(totalContent[cell.RandOffset + cell.PayloadLen:], cell.Padding[cell.RandOffset:])
-	
+	copy(totalContent[cell.RandOffset+cell.PayloadLen:], cell.Padding[cell.RandOffset:])
+
 	buf.Write(totalContent)
 
 	return buf.Bytes(), nil
@@ -174,13 +228,12 @@ func (f *Framer) DecodeCell(data []byte) (*Cell, error) {
 		return nil, errors.New("cell content length mismatch")
 	}
 	
-	// Reorder content to extract payload and padding
 	cell.Payload = make([]byte, cell.PayloadLen)
 	cell.Padding = make([]byte, cell.PaddingLen)
 	
-	copy(cell.Payload, payloadAndPadding[cell.RandOffset:])
+	copy(cell.Payload, payloadAndPadding[cell.RandOffset:int(cell.RandOffset+cell.PayloadLen)])
 	copy(cell.Padding, payloadAndPadding[:cell.RandOffset])
-	copy(cell.Padding[cell.RandOffset:], payloadAndPadding[cell.RandOffset+cell.PayloadLen:])
+	copy(cell.Padding[cell.RandOffset:], payloadAndPadding[int(cell.RandOffset+cell.PayloadLen):])
 
 	return cell, nil
 }
@@ -188,22 +241,17 @@ func (f *Framer) DecodeCell(data []byte) (*Cell, error) {
 // generateCellID creates a cryptographically secure random CellID.
 func (f *Framer) generateCellID() uint16 {
 	var id [2]byte
-	_, err := rand.Read(id[:])
+	_, err := crypto_rand.Read(id[:])
 	if err != nil {
-		return 0 // Fallback, though a real implementation should handle this
+		return 0
 	}
 	return binary.BigEndian.Uint16(id[:])
 }
 
 // generateRandomOffset creates a random offset for payload within the cell.
 func (f *Framer) generateRandomOffset(max uint16) uint16 {
-	if max == 0 {
+	if max <= 1 {
 		return 0
 	}
-	var offset [2]byte
-	_, err := rand.Read(offset[:])
-	if err != nil {
-		return 0
-	}
-	return binary.BigEndian.Uint16(offset[:]) % max
+	return uint16(rand.Intn(int(max - 1)))
 }
