@@ -24,26 +24,24 @@ type Manager struct {
 	scheduler    *scheduler.Scheduler
 	inboundQueue *bytes.Buffer
 	
-	// HMM Classifier for dynamic profiling
-	classifier   *HMMClassifier
+	classifier       *HMMClassifier
 	observationQueue []int
 	
-	// Dynamic profiling state
 	lastProfileSwitch time.Time
 }
 
 // NewManager initializes a new Disguise Manager.
 func NewManager() *Manager {
-	p := profile.GetProfile(profile.Dynamic) // 默认使用动态模式
+	p := profile.GetProfile(profile.Dynamic)
 	s := scheduler.NewScheduler()
 	
 	m := &Manager{
-		profile:      p,
-		framer:       framing.NewFramer(p),
-		reassembler:  framing.NewReassembler(),
-		scheduler:    s,
-		inboundQueue: new(bytes.Buffer),
-		classifier:   NewHMMClassifier(),
+		profile:          p,
+		framer:           framing.NewFramer(p),
+		reassembler:      framing.NewReassembler(),
+		scheduler:        s,
+		inboundQueue:     new(bytes.Buffer),
+		classifier:       NewHMMClassifier(),
 		observationQueue: make([]int, 0, 100),
 		lastProfileSwitch: time.Now(),
 	}
@@ -58,6 +56,13 @@ func NewManager() *Manager {
 func (m *Manager) SetProfile(p *profile.Profile) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	
+	// 在切换配置文件前，使用之前的观察数据训练模型
+	if len(m.observationQueue) > 0 {
+		m.classifier.Train(m.observationQueue, m.profile.GetProfileType())
+		m.observationQueue = m.observationQueue[:0]
+	}
+
 	m.profile = p
 	m.framer.SetProfile(p)
 	m.scheduler.SetProfile(p)
@@ -75,7 +80,6 @@ func (m *Manager) QueueApplicationData(data []byte) error {
 	}
 
 	for _, cell := range cells {
-		// Collect payload length for HMM classification
 		m.observationQueue = append(m.observationQueue, DiscretizePayloadSize(len(cell.Payload)))
 		m.scheduler.ScheduleCell(cell)
 	}
@@ -112,7 +116,6 @@ func (m *Manager) ProcessInboundTraffic(data []byte) error {
 	}
 
 	if cell.Type == framing.TypeData {
-		// Collect payload length for HMM classification
 		m.observationQueue = append(m.observationQueue, DiscretizePayloadSize(len(cell.Payload)))
 		
 		reassembled, err := m.reassembler.ProcessCell(cell)
@@ -123,7 +126,6 @@ func (m *Manager) ProcessInboundTraffic(data []byte) error {
 			m.inboundQueue.Write(reassembled)
 		}
 	} else {
-		// Process other cell types like Handshake, Control, Dummy etc.
 		return nil
 	}
 
@@ -136,7 +138,7 @@ func (m *Manager) ReadApplicationData() ([]byte, error) {
 	defer m.mu.Unlock()
 
 	if m.inboundQueue.Len() == 0 {
-		return nil, nil // No data available
+		return nil, nil
 	}
 
 	data := m.inboundQueue.Bytes()
@@ -162,33 +164,29 @@ func (m *Manager) startCoverTrafficLoop() {
 
 // startDynamicProfilingLoop analyzes traffic load and switches profiles accordingly.
 func (m *Manager) startDynamicProfilingLoop() {
-	ticker := time.NewTicker(5 * time.Second) // Check more frequently
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
 	for {
 		<-ticker.C
 		m.mu.Lock()
 		
-		// 确保有足够的观察值来做预测
 		if len(m.observationQueue) < 10 {
 			m.mu.Unlock()
 			continue
 		}
 		
-		// 使用 HMM 预测最可能的流量类型
 		predictedType, err := m.classifier.Predict(m.observationQueue)
 		if err != nil {
 			m.mu.Unlock()
 			continue
 		}
 		
-		// 如果预测的类型与当前类型不同，则切换配置文件
 		if predictedType != m.profile.GetProfileType() {
 			m.SetProfile(profile.GetProfile(predictedType))
 			fmt.Printf("动态剖析: 切换到 %v 配置文件。\n", predictedType)
 		}
 		
-		// 清空观察队列，准备下一次预测
 		m.observationQueue = m.observationQueue[:0]
 		m.mu.Unlock()
 	}
