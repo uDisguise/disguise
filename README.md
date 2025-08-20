@@ -1,9 +1,3 @@
-好的，我已根据你提供的 `conn (1).go` 文件对 README 进行了修改，使其更准确地反映出伪装协议如何与 Go 标准库的 TLS 连接集成。
-
-以下是更新后的 README。
-
------
-
 # Go TLS with Disguise: An Obfuscated TLS Implementation
 
 This repository is a fork of the standard Go `crypto/tls` library, enhanced with a built-in traffic obfuscation layer. By integrating the Disguise protocol directly into the TLS handshake and record layer, this library provides secure, end-to-end encrypted communication that is also resilient to network traffic analysis and deep packet inspection (DPI).
