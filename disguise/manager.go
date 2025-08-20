@@ -158,7 +158,6 @@ func (m *Manager) startCoverTrafficLoop() {
 
 // startDynamicProfilingLoop analyzes traffic load and switches profiles accordingly.
 func (m *Manager) startDynamicProfilingLoop() {
-	// Check and switch profile every minute.
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 
@@ -166,8 +165,8 @@ func (m *Manager) startDynamicProfilingLoop() {
 		<-ticker.C
 		m.mu.Lock()
 		
-		// This is a simplified ML model based on EWMA.
-		currentLoad := m.profile.currentLoad
+		// 修复: 使用导出的字段 'CurrentLoad'
+		currentLoad := m.profile.CurrentLoad
 		
 		if currentLoad > m.dynamicProfileThresholds[profile.VideoStreaming] {
 			if m.profile.TrafficWeights[profile.VideoStreaming] == 0 {
