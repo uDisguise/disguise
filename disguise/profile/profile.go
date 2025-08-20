@@ -14,6 +14,7 @@ const (
 	WebBrowsing TrafficType = iota
 	VideoStreaming
 	FileDownload
+	CellHeaderLen = 20
 )
 
 // Profile defines the parameters for a traffic simulation profile.
