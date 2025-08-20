@@ -16,10 +16,8 @@ const (
 	FileDownload
 	// New dynamic profile mode
 	Dynamic
+	CellHeaderLen = 20
 )
-
-// CellHeaderLen constant is needed by the Profile to calculate payload size.
-const CellHeaderLen = 20
 
 // Profile defines the parameters for a traffic simulation profile.
 type Profile struct {
@@ -31,8 +29,9 @@ type Profile struct {
 	TrafficWeights    map[TrafficType]float64
 	PayloadDistributions map[TrafficType]distribution
 
-	mu          sync.Mutex
-	currentLoad float64
+	mu sync.Mutex
+	// State for the adaptive model.
+	CurrentLoad float64 // 修复: 将 'currentLoad' 改为 'CurrentLoad'
 }
 
 // distribution is an interface for a statistical distribution.
@@ -100,9 +99,9 @@ func GetProfile(t TrafficType) *Profile {
 				VideoStreaming: &bimodalDistribution{
 					mode1Mean:   64,
 					mode1StdDev: 10,
-					mode1Weight: 0.2,
 					mode2Mean:   1300,
 					mode2StdDev: 50,
+					mode1Weight: 0.2,
 				},
 			},
 		}
@@ -184,6 +183,17 @@ func (p *Profile) GetNextCellSize() int {
 	return rand.Intn(p.MaxCellSize-p.MinCellSize) + p.MinCellSize
 }
 
+// GetProfileType returns the current active profile type based on weights.
+func (p *Profile) GetProfileType() TrafficType {
+	if len(p.TrafficWeights) == 1 {
+		for t := range p.TrafficWeights {
+			return t
+		}
+	}
+	// For dynamic profiles, we can return the 'Dynamic' constant.
+	return Dynamic
+}
+
 // selectTrafficType selects a traffic type based on weighted probabilities.
 func (p *Profile) selectTrafficType() TrafficType {
 	if len(p.TrafficWeights) == 1 {
@@ -207,5 +217,5 @@ func (p *Profile) selectTrafficType() TrafficType {
 // using an Exponentially Weighted Moving Average (EWMA).
 func (p *Profile) updateLoad(latest int) {
 	normalized := float64(latest) / float64(p.MaxCellSize)
-	p.currentLoad = (p.currentLoad * (1 - p.EWMAAlpha)) + (normalized * p.EWMAAlpha)
+	p.CurrentLoad = (p.CurrentLoad * (1 - p.EWMAAlpha)) + (normalized * p.EWMAAlpha)
 }
