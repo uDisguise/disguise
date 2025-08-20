@@ -20,6 +20,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/uDisguise/disguise/disguise"
 )
 
 // A Conn represents a secured connection.
@@ -116,6 +118,9 @@ type Conn struct {
 	activeCall int32
 
 	tmp [16]byte
+
+	// disguiseManager handles all the disguise protocol logic.
+	disguiseManager *disguise.Manager
 }
 
 // Access to net.Conn methods.
@@ -1098,68 +1103,6 @@ var (
 	errShutdown = errors.New("tls: protocol is shutdown")
 )
 
-// Write writes data to the connection.
-//
-// As Write calls Handshake, in order to prevent indefinite blocking a deadline
-// must be set for both Read and Write before Write is called when the handshake
-// has not yet completed. See SetDeadline, SetReadDeadline, and
-// SetWriteDeadline.
-func (c *Conn) Write(b []byte) (int, error) {
-	// interlock with Close below
-	for {
-		x := atomic.LoadInt32(&c.activeCall)
-		if x&1 != 0 {
-			return 0, net.ErrClosed
-		}
-		if atomic.CompareAndSwapInt32(&c.activeCall, x, x+2) {
-			break
-		}
-	}
-	defer atomic.AddInt32(&c.activeCall, -2)
-
-	if err := c.Handshake(); err != nil {
-		return 0, err
-	}
-
-	c.out.Lock()
-	defer c.out.Unlock()
-
-	if err := c.out.err; err != nil {
-		return 0, err
-	}
-
-	if !c.handshakeComplete() {
-		return 0, alertInternalError
-	}
-
-	if c.closeNotifySent {
-		return 0, errShutdown
-	}
-
-	// TLS 1.0 is susceptible to a chosen-plaintext
-	// attack when using block mode ciphers due to predictable IVs.
-	// This can be prevented by splitting each Application Data
-	// record into two records, effectively randomizing the IV.
-	//
-	// https://www.openssl.org/~bodo/tls-cbc.txt
-	// https://bugzilla.mozilla.org/show_bug.cgi?id=665814
-	// https://www.imperialviolet.org/2012/01/15/beastfollowup.html
-
-	var m int
-	if len(b) > 1 && c.vers == VersionTLS10 {
-		if _, ok := c.out.cipher.(cipher.BlockMode); ok {
-			n, err := c.writeRecordLocked(recordTypeApplicationData, b[:1])
-			if err != nil {
-				return n, c.out.setErrorLocked(err)
-			}
-			m, b = 1, b[1:]
-		}
-	}
-
-	n, err := c.writeRecordLocked(recordTypeApplicationData, b)
-	return n + m, c.out.setErrorLocked(err)
-}
-
 // handleRenegotiation processes a HelloRequest handshake message.
 func (c *Conn) handleRenegotiation() error {
 	if c.vers == VersionTLS13 {
@@ -1262,53 +1205,191 @@ func (c *Conn) handleKeyUpdate(keyUpdate *keyUpdateMsg) error {
 	return nil
 }
 
-// Read reads data from the connection.
-//
-// As Read calls Handshake, in order to prevent indefinite blocking a deadline
-// must be set for both Read and Write before Read is called when the handshake
-// has not yet completed. See SetDeadline, SetReadDeadline, and
-// SetWriteDeadline.
-func (c *Conn) Read(b []byte) (int, error) {
-	if err := c.Handshake(); err != nil {
+// Read reads application data from the connection.
+func (c *Conn) Read(b []byte) (n int, err error) {
+	// 确保握手完成
+	if err := c.HandshakeContext(context.Background()); err != nil {
 		return 0, err
 	}
-	if len(b) == 0 {
-		// Put this after Handshake, in case people were calling
-		// Read(nil) for the side effect of the Handshake.
-		return 0, nil
+	if atomic.LoadUint32(&c.handshakeStatus) != 1 {
+		return 0, c.handshakeErr
 	}
 
-	c.in.Lock()
-	defer c.in.Unlock()
+	for {
+		c.in.Lock()
+		// 从 Disguise Manager 读取解封装后的应用层数据
+		plaintext, err := c.disguiseManager.ReadApplicationData()
+		if err == nil && len(plaintext) > 0 {
+			c.in.Unlock()
+			n = copy(b, plaintext)
+			return n, nil
+		}
+		c.in.Unlock()
 
-	for c.input.Len() == 0 {
-		if err := c.readRecord(); err != nil {
+		// 如果没有待读取的应用数据，则从网络读取新的 TLS 记录
+		record, typ, err := c.readAndDecryptRecord()
+		if err != nil {
 			return 0, err
 		}
-		for c.hand.Len() > 0 {
-			if err := c.handlePostHandshakeMessage(); err != nil {
+
+		// 将解密后的 TLS 记录内容传递给 Disguise Manager 进行解封装
+		// 这里的 `record` 是 `c.in.decrypt` 返回的 `plaintext`
+		if typ == recordTypeApplicationData {
+			err = c.disguiseManager.ProcessInboundTraffic(record)
+			if err != nil {
+				// 如果处理失败，可能是一个攻击或协议错误，直接返回
+				c.sendAlert(alertBadRecordMAC)
 				return 0, err
+			}
+			// 再次尝试从 Disguise Manager 读取应用数据
+			continue
+		} else {
+			// 如果不是应用数据，按照原有逻辑处理（如握手、心跳等）
+			switch typ {
+			case recordTypeAlert:
+				var v alert
+				if len(record) == 2 {
+					v = alert(record[1])
+				}
+				if v == alertCloseNotify {
+					c.in.setErrorLocked(io.EOF)
+					return 0, io.EOF
+				}
+				c.in.setErrorLocked(&RecordHeaderError{
+					Msg: fmt.Sprintf("unexpected alert %s", v),
+				})
+				c.sendAlert(alertUnexpectedMessage)
+				return 0, c.in.err
+			case recordTypeChangeCipherSpec:
+				// As a client, we might receive a CCS record, for example,
+				// after an old-style renegotiation. TLS 1.3 does not use
+				// this record type.
+				if c.vers == VersionTLS13 {
+					c.in.setErrorLocked(&RecordHeaderError{
+						Msg: "unexpected ChangeCipherSpec record",
+					})
+					c.sendAlert(alertUnexpectedMessage)
+					return 0, c.in.err
+				}
+				// A server might receive a CCS record after a client
+				// sends one, but the client won't receive a second one.
+				// This code can be simplified in a real implementation.
+				c.in.setErrorLocked(&RecordHeaderError{
+					Msg: "unexpected ChangeCipherSpec record",
+				})
+				c.sendAlert(alertUnexpectedMessage)
+				return 0, c.in.err
+			default:
+				// Any other record type is unexpected after the handshake.
+				c.in.setErrorLocked(&RecordHeaderError{
+					Msg: fmt.Sprintf("unexpected record type %d", typ),
+				})
+				c.sendAlert(alertUnexpectedMessage)
+				return 0, c.in.err
 			}
 		}
 	}
+}
 
-	n, _ := c.input.Read(b)
+// Write writes application data to the connection.
+func (c *Conn) Write(b []byte) (n int, err error) {
+	// 确保握手完成
+	if err := c.HandshakeContext(context.Background()); err != nil {
+		return 0, err
+	}
+	if atomic.LoadUint32(&c.handshakeStatus) != 1 {
+		return 0, c.handshakeErr
+	}
 
-	// If a close-notify alert is waiting, read it so that we can return (n,
-	// EOF) instead of (n, nil), to signal to the HTTP response reading
-	// goroutine that the connection is now closed. This eliminates a race
-	// where the HTTP response reading goroutine would otherwise not observe
-	// the EOF until its next read, by which time a client goroutine might
-	// have already tried to reuse the HTTP connection for a new request.
-	// See https://golang.org/cl/76400046 and https://golang.org/issue/3514
-	if n != 0 && c.input.Len() == 0 && c.rawInput.Len() > 0 &&
-		recordType(c.rawInput.Bytes()[0]) == recordTypeAlert {
-		if err := c.readRecord(); err != nil {
-			return n, err // will be io.EOF on closeNotify
+	// 将应用数据分块并交给 Disguise Manager 进行封装
+	err = c.disguiseManager.QueueApplicationData(b)
+	if err != nil {
+		return 0, err
+	}
+
+	// 持续从 Disguise Manager 获取待发送的伪装数据包
+	// 并发送到网络
+	for {
+		packet, err := c.disguiseManager.GetOutboundTraffic()
+		if err == disguise.ErrNoOutboundTraffic {
+			// 如果没有更多待发送数据，则退出循环
+			break
+		}
+		if err != nil {
+			return 0, err
+		}
+
+		// 使用原始的 TLS 加密逻辑对伪装数据包进行加密
+		// 这里的 `recordTypeApplicationData` 是伪装数据包的类型
+		record, err := c.out.encrypt(nil, packet, c.config.rand())
+		if err != nil {
+			return 0, err
+		}
+
+		// 发送到网络
+		if _, err := c.conn.Write(record); err != nil {
+			return 0, err
 		}
 	}
 
-	return n, nil
+	return len(b), nil
+}
+
+// readAndDecryptRecord is a helper function to read a TLS record, decrypt it,
+// and handle any non-application data records.
+func (c *Conn) readAndDecryptRecord() ([]byte, recordType, error) {
+	for {
+		if err := c.readRecord(); err != nil {
+			if err == io.EOF {
+				return nil, 0, err
+			}
+			return nil, 0, c.in.setErrorLocked(c.handshakeErr)
+		}
+
+		// Process one record from c.rawInput
+		record, typ, err := c.in.decrypt(c.rawInput.Next(c.rawInput.Len()))
+		if err != nil {
+			c.sendAlert(err.(alert))
+			return nil, 0, err
+		}
+
+		switch typ {
+		case recordTypeAlert:
+			var v alert
+			if len(record) == 2 {
+				v = alert(record[1])
+			}
+			if v == alertCloseNotify {
+				return nil, 0, io.EOF
+			}
+			return nil, 0, &RecordHeaderError{
+				Msg: fmt.Sprintf("unexpected alert %s", v),
+			}
+		case recordTypeChangeCipherSpec:
+			// As a client, we might receive a CCS record, for example,
+			// after an old-style renegotiation. TLS 1.3 does not use
+			// this record type.
+			if c.vers == VersionTLS13 {
+				return nil, 0, &RecordHeaderError{
+					Msg: "unexpected ChangeCipherSpec record",
+				}
+			}
+			// A server might receive a CCS record after a client
+			// sends one, but the client won't receive a second one.
+			// This code can be simplified in a real implementation.
+			return nil, 0, &RecordHeaderError{
+				Msg: "unexpected ChangeCipherSpec record",
+			}
+		case recordTypeApplicationData:
+			// This is the data we want to process.
+			return record, typ, nil
+		default:
+			// Any other record type is unexpected after the handshake.
+			return nil, 0, &RecordHeaderError{
+				Msg: fmt.Sprintf("unexpected record type %d", typ),
+			}
+		}
+	}
 }
 
 // Close closes the connection.
