@@ -1257,7 +1257,6 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 				}
 				c.in.setErrorLocked(&RecordHeaderError{
 					Msg: fmt.Sprintf("unexpected alert %s", v),
-					Detail:      errors.New("unexpected alert"),
 				})
 				c.sendAlert(alertUnexpectedMessage)
 				return 0, c.in.err
@@ -1268,7 +1267,6 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 				if c.vers == VersionTLS13 {
 					c.in.setErrorLocked(&RecordHeaderError{
 						Msg: "unexpected ChangeCipherSpec record",
-						Detail:      errors.New("unexpected ChangeCipherSpec record"),
 					})
 					c.sendAlert(alertUnexpectedMessage)
 					return 0, c.in.err
@@ -1278,7 +1276,6 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 				// This code can be simplified in a real implementation.
 				c.in.setErrorLocked(&RecordHeaderError{
 					Msg: "unexpected ChangeCipherSpec record",
-					Detail:      errors.New("unexpected ChangeCipherSpec record"),
 				})
 				c.sendAlert(alertUnexpectedMessage)
 				return 0, c.in.err
@@ -1286,7 +1283,6 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 				// Any other record type is unexpected after the handshake.
 				c.in.setErrorLocked(&RecordHeaderError{
 					Msg: fmt.Sprintf("unexpected record type %d", typ),
-					Detail:      errors.New("unexpected record type"),
 				})
 				c.sendAlert(alertUnexpectedMessage)
 				return 0, c.in.err
@@ -1367,8 +1363,7 @@ func (c *Conn) readAndDecryptRecord() ([]byte, recordType, error) {
 				return nil, 0, io.EOF
 			}
 			return nil, 0, &RecordHeaderError{
-				Msg:    fmt.Sprintf("unexpected alert %s", v),
-				Detail: errors.New("unexpected alert"),
+				Msg: fmt.Sprintf("unexpected alert %s", v),
 			}
 		case recordTypeChangeCipherSpec:
 			// As a client, we might receive a CCS record, for example,
@@ -1376,16 +1371,14 @@ func (c *Conn) readAndDecryptRecord() ([]byte, recordType, error) {
 			// this record type.
 			if c.vers == VersionTLS13 {
 				return nil, 0, &RecordHeaderError{
-					Msg:    "unexpected ChangeCipherSpec record",
-					Detail: errors.New("unexpected ChangeCipherSpec record"),
+					Msg: "unexpected ChangeCipherSpec record",
 				}
 			}
 			// A server might receive a CCS record after a client
 			// sends one, but the client won't receive a second one.
 			// This code can be simplified in a real implementation.
 			return nil, 0, &RecordHeaderError{
-				Msg:    "unexpected ChangeCipherSpec record",
-				Detail: errors.New("unexpected ChangeCipherSpec record"),
+				Msg: "unexpected ChangeCipherSpec record",
 			}
 		case recordTypeApplicationData:
 			// This is the data we want to process.
@@ -1393,8 +1386,7 @@ func (c *Conn) readAndDecryptRecord() ([]byte, recordType, error) {
 		default:
 			// Any other record type is unexpected after the handshake.
 			return nil, 0, &RecordHeaderError{
-				Msg:    fmt.Sprintf("unexpected record type %d", typ),
-				Detail: errors.New("unexpected record type"),
+				Msg: fmt.Sprintf("unexpected record type %d", typ),
 			}
 		}
 	}
