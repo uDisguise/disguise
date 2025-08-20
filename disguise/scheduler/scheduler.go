@@ -2,7 +2,6 @@ package scheduler
 
 import (
 	"container/heap"
-	"math/rand"
 	"sync"
 	"time"
 
