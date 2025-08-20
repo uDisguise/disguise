@@ -20,6 +20,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/uDisguise/disguise/disguise"
 )
 
 // A Conn represents a secured connection.
