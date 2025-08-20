@@ -5,7 +5,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"time"
-
+	"sync"
+	"bytes"
+	
 	"github.com/uDisguise/disguise/disguise/profile"
 )
 
