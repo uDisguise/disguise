@@ -2,10 +2,8 @@ package disguise
 
 import (
 	"errors"
-	"fmt"
 	"github.com/uDisguise/disguise/disguise/profile"
 	"math"
-	"math/rand"
 	"sync"
 )
 
@@ -64,7 +62,7 @@ func NewHMMClassifier() *HMMClassifier {
 	}
 
 	// Add smoothing to initial probabilities
-	for s, emissions := range emissionProbs {
+	for _, emissions := range emissionProbs {
 		sum := 0.0
 		for i, p := range emissions {
 			emissions[i] = p + epsilon
